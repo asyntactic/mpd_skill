@@ -22,6 +22,14 @@ class MPDReconnectable(mpd.MPDClient):
     def __init__(self):
         super().__init__()
 
+    def __reconnect__(self):
+        try:
+            #self.close()
+            super(MPDReconnectable, self).disconnect()
+        except:
+            pass
+        super().connect(self.__uri, self.__port)
+
     def connect(self, uri, port=6600):
         self.__uri = uri
         self.__port = port
@@ -31,64 +39,70 @@ class MPDReconnectable(mpd.MPDClient):
         try:
             return super().searchadd(*args)
         except Exception:
-            super().connect(self.__uri, self.__port)
+            self.__reconnect__()
             return super().searchadd(*args)
 
     def list(self, *args):
         try:
             return super().list(*args)
         except Exception:
-            super().connect(self.__uri, self.__port)
+            self.__reconnect__()
             return super().list(*args)
 
     def pause(self, PAUSE):
         try:
             return super().pause(PAUSE)
         except Exception:
-            super().connect(self.__uri, self.__port)
+            self.__reconnect__()
             return super().pause(PAUSE)
 
     def stop(self):
         try:
             return super().stop()
         except Exception:
-            super().connect(self.__uri, self.__port)
+            self.__reconnect__()
             return super(MPDReconnectable, self).stop()
 
     def play(self):
         try:
             return super().play()
         except Exception:
-            super().connect(self.__uri, self.__port)
+            self.__reconnect__()
             return super().play()
 
     def currentsong(self):
         try:
             return super(MPDReconnectable, self).currentsong()
         except Exception:
-            super().connect(self.__uri, self.__port)
+            self.__reconnect__()
             return super().currentsong()
 
     def next(self):
         try:
             return super(MPDReconnectable, self).next()
         except Exception:
-            super(MPDReconnectable, self).connect(self.__uri, self.__port)
-            return super(MPDReconnectable, self).next()
+            self.__reconnect__()
+            #super(MPDReconnectable, self).connect(self.__uri, self.__port)
+            #return super(MPDReconnectable, self).next()
+            return super().next()
 
     def previous(self):
         try:
             return super(MPDReconnectable, self).previous()
         except Exception:
-            super(MPDReconnectable, self).connect(self.__uri, self.__port)
-            return super(MPDReconnectable, self).previous()
+            self.__reconnect__()
+            #super(MPDReconnectable, self).connect(self.__uri, self.__port)
+            #return super(MPDReconnectable, self).previous()
+            return super().previous()
 
     def clear(self):
         try:
             return super(MPDReconnectable, self).clear()
         except Exception:
-            super(MPDReconnectable, self).connect(self.__uri, self.__port)
-            return super(MPDReconnectable, self).clear()
+            self.__reconnect__()
+            #super(MPDReconnectable, self).connect(self.__uri, self.__port)
+            #return super(MPDReconnectable, self).clear()
+            return super().clear()
 
 
 class MPDSkill(CommonPlaySkill):
@@ -124,10 +138,13 @@ class MPDSkill(CommonPlaySkill):
             self.genres = self.server.list('genre')
             self.log.info('Titles...')
             self.titles = self.server.list('title')
+            self.log.info('Playlists...')
+            self.playlists = [i['playlist']
+                              for i in self.server.listplaylists()]
             self.log.info('Done!')
 
             self.playlist = (self.albums + self.artists +
-                             self.genres + self.titles)
+                             self.genres + self.titles + self.playlists)
             self.register_vocabulary(self.name, 'NameKeyword')
             return True
         except Exception:
@@ -149,38 +166,85 @@ class MPDSkill(CommonPlaySkill):
                                       name='mpd_check')
 
     def CPS_match_query_phrase(self, phrase):
+        lists = []
         if self.playlist:
-            key, confidence = extractOne(phrase, self.playlist)
+            lists = [{'type': i[0],
+                      # match is key, confidence
+                      'match': extractOne(phrase, i[1])}
+                     for i in [('album', self.albums),
+                               ('artist', self.artists),
+                               ('genre', self.genres),
+                               ('title', self.titles),
+                               ('playlist', self.playlists)]]
+            lists = [{'type': i['type'],
+                      'key': i['match'][0],
+                      'confidence': i['match'][1]} for i in lists]
+            lists = sorted(lists, key=lambda x: x['confidence'], reverse=True)
+            best = lists[0]
+
+            self.log.info(f"best match: type: {best['type']}, key: {best['key']}, confidence: {best['confidence']}")
+            
+            confidence = best['confidence']
+            key = best['key']
+            thetype = best['type']
+            
             if confidence < 50:
                 self.log.info('couldn\'t find playlist')
                 return None
-            elif confidence > 90:
-                confidence = CPSMatchLevel.EXACT
-            elif confidence > 70:
-                confidence = CPSMatchLevel.MULTI_KEY
-            elif confidence > 60:
-                confidence = CPSMatchLevel.TITLE
-            else:
-                confidence = CPSMatchLevel.CATEGORY
+
+            if confidence > 90:
+                retcon = CPSMatchLevel.EXACT
+            elif len([i for i in lists if i['confidence'] > 50]) > 1:
+                retcon = CPSMatchLevel.MULTI_KEY
+            elif best['type'] == 'title':
+                retcon = CPSMatchLevel.TITLE
+            elif best['type'] == 'genre':
+                retcon = CPSMatchLevel.CATEGORY
+            elif best['type'] == 'playlist':
+                retcon = CPSMatchLevel.GENERIC
+
             self.log.info('MPD Found {}'.format(key))
-            return phrase, confidence, {'playlist': key}
+            return phrase, retcon, {'playlist': key, 'type': thetype}
+
+        # if self.playlist:
+        #     key, confidence = extractOne(phrase, self.playlist)
+        #     if confidence < 50:
+        #         self.log.info('couldn\'t find playlist')
+        #         return None
+        #     elif confidence > 90:
+        #         confidence = CPSMatchLevel.EXACT
+        #     elif confidence > 70:
+        #         confidence = CPSMatchLevel.MULTI_KEY
+        #     elif confidence > 60:
+        #         confidence = CPSMatchLevel.TITLE
+        #     else:
+        #         confidence = CPSMatchLevel.CATEGORY
+        #     self.log.info('MPD Found {}'.format(key))
+        #     return phrase, confidence, {'playlist': key}
         else:
             self.log.info('Sorry MPD has no playlists...')
 
     def CPS_start(self, phrase, data):
         self.log.info('Starting playback for {}'.format(data))
         p = data['playlist']
+        t = data['type']
         self.server.clear()
         self.server.stop()
-        self.speak("Playing " + str(p))
-        time.sleep(3)
+        self.speak("Playing " + str(p), wait=True)
+        #time.sleep(3)
 
-        if p in self.genres:
-            self.server.searchadd('genre', p)
-        elif p in self.artists:
-            self.server.searchadd('artist', p)
+        # if p in self.genres:
+        #     self.server.searchadd('genre', p)
+        # elif p in self.artists:
+        #     self.server.searchadd('artist', p)
+        # else:
+        #     self.server.searchadd('album', p)
+        
+        self.server.repeat(0)
+        if t == 'playlist':
+            self.server.load(p)
         else:
-            self.server.searchadd('album', p)
+            self.server.searchadd(t, p)
 
         self.server.play()
 
